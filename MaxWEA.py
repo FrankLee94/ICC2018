@@ -14,8 +14,8 @@ import pickle
 import copy
 import time
 
-ONU_NUM = 32
-WAVELENGTH_NUM = 16
+ONU_NUM = 4
+WAVELENGTH_NUM = 8
 UPSTREAM_RATE = 1e10    # 10G/s
 PERIOD = 1e7            # 1e7 μs, 10s
 RTT = 100.0             # 100μs, single trip, 0.1ms
@@ -54,12 +54,15 @@ def ONU_initialization():
 		ONU.append(ONU_object)
 	return ONU
 
-def set_arrive_rate():
-	ONU_arrive_rate = []
-	ONU_bandwidth = [9.5/4, 9.5/4, 9.5/4, 9.5/4]   # Gbps
-	for item in ONU_bandwidth:
-		arrive_rate = int(item * 1000 / 0.6328)
-		ONU_arrive_rate.append(arrive_rate)
+def set_arrive_rate(period_num, area):
+	ONU_arrive_rate = [0 for i in range(ONU_NUM)]
+	ONU_bandwidth = [0 for i in range(ONU_NUM)]   # Gbps
+	for i in range(ONU_NUM - 1):
+		ONU_bandwidth[i] = area[period_num]
+	ONU_bandwidth[ONU_NUM - 1] = area[period_num] * 5
+	for i in range(ONU_NUM):
+		arrive_rate = int(ONU_bandwidth[i] * 100000 / 0.6328)
+		ONU_arrive_rate[i] = arrive_rate
 	return ONU_arrive_rate
 
 # generate packets for a ONU in a PERIOD
@@ -74,7 +77,7 @@ def packet_generation_one_ONU(arrive_rate):
 		interval = -(1e6 / arrive_rate) * math.log(1 - Probability_Poisson)   # generate a packet
 		interval = int(round(interval))
 		Probability_Uniform = random.random()
-		packet_size = 100 * (64 + int (1454 * Probability_Uniform))  # byte
+		packet_size = 1 * (64 + int (1454 * Probability_Uniform))  # byte
 		time_index += interval       # generation time
 		onu_packet.append(packet_size)
 		time_stamp.append(time_index)
@@ -132,46 +135,109 @@ def delay_calculation(ONU_object, time_stamp, absolute_clock):
 		for i in range(ONU_object.end_packet - ONU_object.start_packet + 1):
 			ONU_object.total_delay += absolute_clock - time_stamp[ONU_object.start_packet + i]
 
-# polling scheme
-def polling(ONU, ONU_arrive_rate):
-	packet, stamp = packet_generation_all_ONU(ONU_arrive_rate)
-	absolute_clock = RTT                   # before the first ONU sends data, the OLT needs to send a grant
-	polling_init(ONU, packet, stamp, absolute_clock)   # report grant for the first time
-
-	while absolute_clock < PERIOD:
-		for i in range(ONU_NUM):
-			transmission_time = packet_transmission(ONU[i])
-			delay_calculation(ONU[i], stamp[i], absolute_clock)
-			absolute_clock += transmission_time
-			grant_determine(ONU[i], packet[i], stamp[i], absolute_clock)
-			absolute_clock += T_GUARD
-			ONU[0].trans_time += transmission_time
-			ONU[0].guard_time += T_GUARD
+# after each period (10s here), ONU needs to be reset. make sure that packet_delay...can not be reset
+def reset(ONU):
 	for i in range(ONU_NUM):
-		ONU[i].total_packet += len(packet[i])
+		ONU[i].grant = 0
+		ONU[i].start_packet = -1
+		ONU[i].end_packet = -1
+
+# polling scheme
+def polling(ONU_1, ONU_arrive_rate_1, ONU_2, ONU_arrive_rate_2):
+	packet_1, stamp_1 = packet_generation_all_ONU(ONU_arrive_rate_1)
+	packet_2, stamp_2 = packet_generation_all_ONU(ONU_arrive_rate_2)
+	absolute_clock_1 = RTT                   # before the first ONU sends data, the OLT needs to send a grant
+	absolute_clock_2 = RTT
+	polling_init(ONU_1, packet_1, stamp_1, absolute_clock_1)   # report grant for the first time
+	polling_init(ONU_2, packet_2, stamp_2, absolute_clock_2)   # report grant for the first time
+
+	index_1 = 0
+	index_2 = 0
+	while absolute_clock_1 < PERIOD and absolute_clock_2 < PERIOD:
+		if absolute_clock_1 <= absolute_clock_2:   # the first wavelength should be polled first
+			if index_1 != 4:              # polling the wavelength 1 
+				transmission_time = packet_transmission(ONU_1[index_1])
+				delay_calculation(ONU_1[index_1], stamp_1[index_1], absolute_clock_1)
+				absolute_clock_1 += transmission_time
+				grant_determine(ONU_1[index_1], packet_1[index_1], stamp_1[index_1], absolute_clock_1)
+				absolute_clock_1 += T_GUARD
+				ONU_1[0].trans_time += transmission_time
+				ONU_1[0].guard_time += T_GUARD
+				index_1 += 1
+			else:                                 # polling the updated ONU in wavelength 2
+				transmission_time = packet_transmission(ONU_2[3])
+				delay_calculation(ONU_2[3], stamp_2[3], absolute_clock_1)
+				absolute_clock_1 += transmission_time
+				grant_determine(ONU_2[3], packet_2[3], stamp_2[3], absolute_clock_1)
+				absolute_clock_1 += T_GUARD
+				ONU_1[0].trans_time += transmission_time
+				ONU_1[0].guard_time += T_GUARD
+				index_1 = 0
+		else:
+			if index_2 != 4:              # polling the wavelength 2 
+				transmission_time = packet_transmission(ONU_2[index_2])
+				delay_calculation(ONU_2[index_2], stamp_2[index_2], absolute_clock_2)
+				absolute_clock_2 += transmission_time
+				grant_determine(ONU_2[index_2], packet_2[index_2], stamp_2[index_2], absolute_clock_2)
+				absolute_clock_2 += T_GUARD
+				ONU_2[0].trans_time += transmission_time
+				ONU_2[0].guard_time += T_GUARD
+				index_2 += 1
+			else:                                 # polling the updated ONU in wavelength 1
+				transmission_time = packet_transmission(ONU_1[3])
+				delay_calculation(ONU_1[3], stamp_1[3], absolute_clock_2)
+				absolute_clock_2 += transmission_time
+				grant_determine(ONU_1[3], packet_1[3], stamp_1[3], absolute_clock_2)
+				absolute_clock_2 += T_GUARD
+				ONU_2[0].trans_time += transmission_time
+				ONU_2[0].guard_time += T_GUARD
+				index_2 = 0
+
+	for i in range(ONU_NUM):
+		ONU_1[i].total_packet += len(packet_1[i])
+		ONU_2[i].total_packet += len(packet_2[i])
+	reset(ONU_1)  # reset some parameters
+	reset(ONU_2)  # reset some parameters
+
 
 # statistics
 # delay and bandwidth utilization
-def statistics(ONU):
+def statistics(ONU_1, ONU_2):
 	ONU_delay = []
 	sum_packet = 0
 	sum_delay = 0
 	for i in range(ONU_NUM):
-		sum_packet += ONU[i].total_packet
-		sum_delay += ONU[i].total_delay
-		ONU_delay.append(int(ONU[i].total_delay / ONU[i].total_packet))
+		sum_packet += ONU_1[i].total_packet
+		sum_delay += ONU_1[i].total_delay
+		sum_packet += ONU_2[i].total_packet
+		sum_delay += ONU_2[i].total_delay
+		ONU_delay_ith = (ONU_1[i].total_delay + ONU_2[i].total_delay) / (ONU_1[i].total_packet + ONU_2[i].total_packet)
+		ONU_delay.append(int(ONU_delay_ith))
 
 	average_delay = int(sum_delay / sum_packet)
-	bandwidth_utilization = float(ONU[0].trans_time) / float(ONU[0].trans_time + ONU[0].guard_time)
-	print 'trans_time:' + '\t' + str(ONU[0].trans_time)
-	print 'guard_time:' + '\t' + str(ONU[0].guard_time)
+	total_trans_time = ONU_1[0].trans_time + ONU_2[0].trans_time
+	total_guard_time = ONU_1[0].guard_time + ONU_2[0].guard_time
+	bandwidth_utilization = float(total_trans_time) / float(total_trans_time + total_guard_time)
+	print 'trans_time:' + '\t' + str(total_trans_time)
+	print 'guard_time:' + '\t' + str(total_guard_time)
+	print 'sum_packet' + '\t' + str(sum_packet)
+	print 'sum_delay' + '\t' + str(sum_delay)
 	bandwidth_utilization = round(bandwidth_utilization, 3)
 	return average_delay, bandwidth_utilization, ONU_delay
 						
 if __name__ == '__main__':
-	ONU = ONU_initialization()
-	ONU_arrive_rate = set_arrive_rate()
-	polling(ONU, ONU_arrive_rate)
-	average_delay, bandwidth_utilization, ONU_delay = statistics(ONU)
+	ONU_1 = ONU_initialization()
+	ONU_2 = ONU_initialization()
+
+	for i in range(12):
+		print 'period:' + '\t' + str(i)
+		ONU_arrive_rate_1 = set_arrive_rate(i, residence)
+		ONU_arrive_rate_2 = set_arrive_rate(i, business)
+		polling(ONU_1, ONU_arrive_rate_1, ONU_2, ONU_arrive_rate_2)
+
+	average_delay, bandwidth_utilization, ONU_delay = statistics(ONU_1, ONU_2)
 	print 'average_delay:' + '\t' + str(average_delay) + 'μs'
 	print 'bandwidth_utilization:' + '\t' + str(bandwidth_utilization)
+	print 'respective delay:' + '\n'
+	for i in range(ONU_NUM):
+		print 'ONU No. :' + str(i + 1) + '\t' + str(ONU_delay[i]) + 'μs' + '\n'
